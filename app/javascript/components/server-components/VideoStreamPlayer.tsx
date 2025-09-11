@@ -71,6 +71,45 @@ export const VideoStreamPlayer = ({
         })),
       });
 
+      // Temporary diagnostics to help sanity-test stalled/error behavior locally
+      // eslint-disable-next-line no-console
+      const log = (...args: unknown[]) => console.debug("[JWPlayer]", ...args);
+
+      let lastKnownPosition = 0;
+      let lastKnownDuration = 0;
+      let isBuffering = false;
+      let bufferingStartedAt = 0;
+      let consecutiveReloadAttempts = 0;
+      const MAX_RELOAD_ATTEMPTS = 3;
+      const BUFFER_STALL_MS = 5000;
+
+      const getCurrentItemConfig = (): jwplayer.PlaylistItem => player.getPlaylistItem();
+
+      const reloadAndResume = () => {
+        if (consecutiveReloadAttempts >= MAX_RELOAD_ATTEMPTS) return;
+        consecutiveReloadAttempts += 1;
+        throttledTrackMediaLocation.cancel();
+
+        const resumeAt = lastKnownPosition || 0;
+        log("Reloading item to recover. attempt=", consecutiveReloadAttempts, "resumeAt=", resumeAt);
+
+        const currentItem = getCurrentItemConfig();
+        player.load([currentItem]);
+        player.once("playlistItem", () => {
+          player.play(true);
+          if (resumeAt > 0) {
+            setTimeout(() => {
+              try {
+                player.seek(resumeAt);
+                log("Sought to", resumeAt);
+              } catch (e) {
+                log("Seek failed after reload", e);
+              }
+            }, 250);
+          }
+        });
+      };
+
       const updateLocalMediaLocation = (position: number, duration: number) => {
         const videoFile = playlist[player.getPlaylistIndex()];
         if (videoFile && isInitialSeekDone && lastPlayedId === player.getPlaylistIndex()) {
@@ -105,11 +144,17 @@ export const VideoStreamPlayer = ({
       player.on("seek", (ev) => {
         trackMediaLocation(ev.offset);
         updateLocalMediaLocation(ev.offset, player.getDuration());
+        lastKnownPosition = ev.offset;
       });
 
       player.on("time", (ev) => {
         throttledTrackMediaLocation(ev.position);
         updateLocalMediaLocation(ev.position, ev.duration);
+        lastKnownPosition = ev.position;
+        lastKnownDuration = ev.duration;
+        isBuffering = false;
+        bufferingStartedAt = 0;
+        consecutiveReloadAttempts = 0;
       });
 
       player.on("complete", () => {
@@ -133,6 +178,34 @@ export const VideoStreamPlayer = ({
           lastPlayedId = itemId;
           isInitialSeekDone = false;
         }
+      });
+
+      // Recovery and diagnostics events
+      player.on("buffer", () => {
+        log("buffer");
+        isBuffering = true;
+        bufferingStartedAt = Date.now();
+        setTimeout(() => {
+          if (isBuffering && Date.now() - bufferingStartedAt >= BUFFER_STALL_MS) {
+            log("buffer stall detected, attempting reload");
+            reloadAndResume();
+          }
+        }, BUFFER_STALL_MS + 50);
+      });
+
+      // 'stalled' may not be present in jwplayer typings; rely on other events
+
+      player.on("idle", () => {
+        log("idle at", lastKnownPosition, "/", lastKnownDuration);
+        if (lastKnownDuration > 0 && lastKnownPosition < lastKnownDuration - 1) {
+          log("unexpected idle before end, attempting reload");
+          reloadAndResume();
+        }
+      });
+
+      player.on("error", (ev) => {
+        log("error", ev);
+        reloadAndResume();
       });
 
       player.on("visualQuality", () => {
