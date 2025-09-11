@@ -80,13 +80,19 @@ export const VideoStreamPlayer = ({
       let isBuffering = false;
       let bufferingStartedAt = 0;
       let consecutiveReloadAttempts = 0;
+      let bufferStallCheckTimeout: NodeJS.Timeout | null = null;
       const MAX_RELOAD_ATTEMPTS = 3;
       const BUFFER_STALL_MS = 5000;
 
       const getCurrentItemConfig = (): jwplayer.PlaylistItem => player.getPlaylistItem();
 
       const reloadAndResume = () => {
-        if (consecutiveReloadAttempts >= MAX_RELOAD_ATTEMPTS) return;
+        if (consecutiveReloadAttempts >= MAX_RELOAD_ATTEMPTS) {
+          log("Max reload attempts reached, stopping recovery");
+          // Consider dispatching an event or calling a callback to notify the UI
+          // that playback recovery has failed
+          return;
+        }
         consecutiveReloadAttempts += 1;
         throttledTrackMediaLocation.cancel();
 
@@ -155,6 +161,10 @@ export const VideoStreamPlayer = ({
         isBuffering = false;
         bufferingStartedAt = 0;
         consecutiveReloadAttempts = 0;
+        if (bufferStallCheckTimeout) {
+          clearTimeout(bufferStallCheckTimeout);
+          bufferStallCheckTimeout = null;
+        }
       });
 
       player.on("complete", () => {
@@ -185,11 +195,13 @@ export const VideoStreamPlayer = ({
         log("buffer");
         isBuffering = true;
         bufferingStartedAt = Date.now();
-        setTimeout(() => {
+        if (bufferStallCheckTimeout) clearTimeout(bufferStallCheckTimeout);
+        bufferStallCheckTimeout = setTimeout(() => {
           if (isBuffering && Date.now() - bufferingStartedAt >= BUFFER_STALL_MS) {
             log("buffer stall detected, attempting reload");
             reloadAndResume();
           }
+          bufferStallCheckTimeout = null;
         }, BUFFER_STALL_MS + 50);
       });
 
